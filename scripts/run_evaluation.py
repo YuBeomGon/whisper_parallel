@@ -46,7 +46,16 @@ def setup_arg_parser():
     p.add_argument("--base_model", type=str, default="openai/whisper-large-v3-turbo",
                    help="베이스 모델 ID (학습에 사용한 것과 동일 권장)")
     p.add_argument("--batch_size", type=int, default=1)
+    p.add_argument("--gamma", type=float, default=None,
+                help="디코더 병렬 전환 계수. 1.0=원본(순차), 0.0=완전 병렬. 미지정 시 체크포인트값 사용")
+    
     return p.parse_args()
+
+# evaluate_model() 안, model/generation_config 설정 이후에 추가
+def set_decoder_gamma(model, gamma: float):
+    for layer in model.model.decoder.layers:
+        if hasattr(layer, "gamma"):
+            layer.gamma.fill_(float(gamma))
 
 def evaluate_model(arch: str, model_path: str, base_model: str, batch_size: int):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -67,6 +76,10 @@ def evaluate_model(arch: str, model_path: str, base_model: str, batch_size: int)
     # dtype/디바이스 완전 통일
     model.to(device=device, dtype=torch_dtype)
     model.eval()
+    
+    if args.gamma is not None:
+        set_decoder_gamma(model, args.gamma)    
+        
     # deprecation/마스크 경고 완화
     model.generation_config.pad_token_id = processor.tokenizer.eos_token_id
 

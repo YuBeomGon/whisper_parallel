@@ -7,7 +7,7 @@
 # ==============================================================================
 import torch
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
@@ -16,6 +16,7 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     Hugging Face의 WhisperProcessor 객체를 사용하여 오디오와 텍스트를 처리합니다.
     """
     processor: Any
+    model_dtype: Optional[torch.dtype] = None   # ★ 추가: 모델 dtype(f16/bf16)로 캐스팅용
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         """
@@ -39,6 +40,10 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         batch = self.processor.feature_extractor.pad(
             input_features, return_tensors="pt"
         )
+        
+        # ★ 모델 dtype으로 캐스팅
+        if self.model_dtype is not None:
+            batch["input_features"] = batch["input_features"].to(self.model_dtype)        
 
         # 2. 텍스트 라벨(labels) 분리 및 패딩
         # 배치 내 모든 라벨 시퀀스를 동일한 길이로 맞추기 위해 패딩합니다.
