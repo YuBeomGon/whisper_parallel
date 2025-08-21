@@ -49,23 +49,47 @@ class UnfreezeCrossLNAtGamma(TrainerCallback):
     """gamma가 threshold 이하로 내려가면 cross-attn LN만 해제"""
     def __init__(self, threshold: float):
         self.threshold = threshold
+        self.lr = lr
         self.done = False
 
     def on_step_end(self, args, state, control, **kwargs):
         if self.done:
             return control
+
         model = kwargs["model"]
+        optimizer = kwargs.get("optimizer", None)
+
+        # gamma 읽기(첫 레이어 기준)
         gamma = None
         for layer in model.model.decoder.layers:
             if hasattr(layer, "gamma"):
                 g = layer.gamma
                 gamma = float(g.item() if hasattr(g, "item") else g)
                 break
-        if gamma is not None and gamma <= self.threshold:
-            set_cross_ln_requires_grad(model, True)
-            self.done = True
-            print(f"[UnfreezeCrossLNAtGamma] gamma={gamma:.3f} ≤ {self.threshold:.3f} → cross-attn LN unfrozen")
-        return control   
+
+        # 아직 임계값 못 내려오면 패스
+        if gamma is None or gamma > self.threshold:
+            return control
+
+        # 1) LN requires_grad 켜기
+        new_params = []
+        for layer in model.model.decoder.layers:
+            for p in layer.encoder_attn_layer_norm.parameters():
+                if not p.requires_grad:
+                    p.requires_grad = True
+                    new_params.append(p)
+
+        # 2) 옵티마이저 param group에 없으면 추가
+        if optimizer is not None and new_params:
+            existing = {id(p) for group in optimizer.param_groups for p in group["params"]}
+            to_add = [p for p in new_params if id(p) not in existing]
+            if to_add:
+                optimizer.add_param_group({"params": to_add, "lr": self.lr})
+                print(f"[UnfreezeCrossLNAtGamma] Added {len(to_add)} LN params to optimizer")
+
+        print(f"[UnfreezeCrossLNAtGamma] gamma={gamma:.3f} ≤ {self.threshold:.3f} → cross-attn LN unfrozen")
+        self.done = True
+        return control
     
 class DelayedEarlyStoppingCallback(TrainerCallback):
     """
@@ -141,6 +165,8 @@ class ParallelTransitionCallback(TrainerCallback):
         for layer in model.model.decoder.layers:
             if hasattr(layer, "gamma"):
                 layer.gamma.fill_(gamma)
+        if step % 1000 == 0:  # 가끔 찍기
+            print(f"[Gamma] step={step} gamma={gamma:.4f}")                
         return control
 
 
@@ -341,7 +367,7 @@ def run_training():
     
     # LN 지연 해제: 예) --unfreeze_cross_ln_at_gamma 0.6
     if args.freeze_cross_ln and args.unfreeze_cross_ln_at_gamma is not None:
-        trainer.add_callback(UnfreezeCrossLNAtGamma(args.unfreeze_cross_ln_at_gamma))
+        trainer.add_callback(UnfreezeCrossLNAtGamma(args.unfreeze_cross_ln_at_gamma, lr=args.learning_rate))
     
     
     # Early Stopping: min_step 이후부터만 적용

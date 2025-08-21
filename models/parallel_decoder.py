@@ -39,7 +39,7 @@ class ParallelWhisperDecoderLayer(nn.Module):
         self.activation_dropout_p = getattr(config, "activation_dropout", 0.0)
 
         # ★ γ 스위치: 1.0(원본과 동일) → 0.0(완전 병렬)로 스케줄링
-        self.register_buffer("gamma", torch.tensor(1.0))
+        self.register_buffer("gamma", torch.tensor(1.0), persistent=False)
 
     # --- 어텐션 호출(버전 차이 안전 처리) ---
     def _call_self_attn(self, hidden_states, attention_mask, layer_head_mask,
@@ -112,7 +112,13 @@ class ParallelWhisperDecoderLayer(nn.Module):
         # 원본: LN2(residual + dropout(self_out))  ← γ=1.0
         # 완전 병렬: LN2(residual)                 ← γ=0.0
         self_out_d = F.dropout(self_out, p=self.dropout_p, training=self.training)
-        cross_in = self.encoder_attn_layer_norm(residual + self.gamma * self_out_d)
+
+        # ★ gamma를 hidden_states dtype으로 맞춰서 업캐스트 방지
+        gamma = self.gamma
+        if gamma.dtype != hidden_states.dtype:
+            gamma = gamma.to(hidden_states.dtype)
+                    
+        cross_in = self.encoder_attn_layer_norm(residual + gamma * self_out_d)
 
         # ===== Cross-Attn =====
         cross_outputs = self._call_cross_attn(
