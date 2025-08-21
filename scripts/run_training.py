@@ -33,6 +33,87 @@ except Exception:
     HAS_LIBRISPEECH = False
 
 
+def set_cross_attn_requires_grad(model, requires_grad: bool):
+    # 디코더 cross-attn 파라미터 전부 동결/해제
+    for layer in model.model.decoder.layers:
+        for p in layer.cross_attn.parameters():
+            p.requires_grad = requires_grad
+
+def set_cross_ln_requires_grad(model, requires_grad: bool):
+    # cross-attn 앞 LayerNorm 동결/해제
+    for layer in model.model.decoder.layers:
+        for p in layer.encoder_attn_layer_norm.parameters():
+            p.requires_grad = requires_grad
+            
+class UnfreezeCrossLNAtGamma(TrainerCallback):
+    """gamma가 threshold 이하로 내려가면 cross-attn LN만 해제"""
+    def __init__(self, threshold: float):
+        self.threshold = threshold
+        self.done = False
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self.done:
+            return control
+        model = kwargs["model"]
+        gamma = None
+        for layer in model.model.decoder.layers:
+            if hasattr(layer, "gamma"):
+                g = layer.gamma
+                gamma = float(g.item() if hasattr(g, "item") else g)
+                break
+        if gamma is not None and gamma <= self.threshold:
+            set_cross_ln_requires_grad(model, True)
+            self.done = True
+            print(f"[UnfreezeCrossLNAtGamma] gamma={gamma:.3f} ≤ {self.threshold:.3f} → cross-attn LN unfrozen")
+        return control   
+    
+class DelayedEarlyStoppingCallback(TrainerCallback):
+    """
+    min_step 이전에는 '기다리기'만 하고 patience 카운트/스톱을 하지 않음.
+    min_step 이후부터 일반 Early Stopping 로직 적용.
+    """
+    def __init__(self, metric_name: str = "cer", greater_is_better: bool = False,
+                 patience: int = 20, threshold: float = 5e-4, min_step: int = 0):
+        self.metric_key = metric_name if metric_name.startswith("eval_") else f"eval_{metric_name}"
+        self.sign = 1.0 if greater_is_better else -1.0
+        self.patience = patience
+        self.threshold = threshold
+        self.min_step = min_step
+        self.best = None
+        self.wait = 0
+
+    def on_evaluate(self, args, state, control, metrics, **kwargs):
+        if self.metric_key not in metrics:
+            return control
+
+        step = state.global_step
+        value = metrics[self.metric_key]
+
+        def improved(new, ref):
+            # improvement if sign*(new - ref) > threshold
+            return self.sign * (new - ref) < -self.threshold
+
+        # 항상 best 추적은 하지만,
+        # min_step 이전에는 wait/patience를 올리지 않음
+        if self.best is None or improved(value, self.best):
+            self.best = value
+            self.wait = 0
+            return control
+
+        if step < self.min_step:
+            # 아직은 기다리기만
+            return control
+
+        # min_step 이후부터 patience 카운트
+        self.wait += 1
+        if self.wait >= self.patience:
+            print(f"[DelayedEarlyStopping] step {step}: no improvement in {self.patience} evals → STOP")
+            control.should_training_stop = True
+        return control             
+            
+            
+
+
 # ---------- γ-annealing 콜백 ----------
 class ParallelTransitionCallback(TrainerCallback):
     """gamma: 1.0(원본) -> 0.0(완전 병렬)로 코사인 전개"""
@@ -116,6 +197,17 @@ def parse_args():
 
     # --- 기타 ---
     p.add_argument("--no_freeze_encoder", action="store_true", help="인코더 동결 해제")
+    
+    p.add_argument("--freeze_cross_attn", action="store_true",
+                help="디코더 cross-attn(Wqkv/wo) 동결")
+    p.add_argument("--freeze_cross_ln", action="store_true",
+                help="디코더 cross-attn 앞 LayerNorm 동결")
+    p.add_argument("--unfreeze_cross_ln_at_gamma", type=float, default=None,
+                help="gamma가 이 값 이하로 내려가면 cross-attn LN 해제")
+
+    # Early Stopping을 언제부터 켤지
+    p.add_argument("--early_stop_min_step", type=int, default=None,
+                help="이 스텝 이후부터 Early Stopping 적용 (미지정 시 gamma_end_frac*max_steps)")    
     return p.parse_args()
 
 
@@ -171,6 +263,14 @@ def run_training():
             p.requires_grad = False
     else:
         print("인코더 동결 해제(--no_freeze_encoder).")
+        
+    # ★ cross-attn / LN 동결 옵션
+    if args.freeze_cross_attn:
+        print("Freeze: decoder cross-attn weights")
+        set_cross_attn_requires_grad(model, False)
+    if args.freeze_cross_ln:
+        print("Freeze: cross-attn LayerNorm")
+        set_cross_ln_requires_grad(model, False)        
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -237,12 +337,28 @@ def run_training():
         start=args.gamma_start, end=args.gamma_end,
         start_frac=args.gamma_start_frac, end_frac=args.gamma_end_frac,
     )
-    early_cb = EarlyStoppingCallback(
-        early_stopping_patience=20,
-        early_stopping_threshold=5e-4,
-    )
     trainer.add_callback(gamma_cb)
-    trainer.add_callback(early_cb)
+    
+    # LN 지연 해제: 예) --unfreeze_cross_ln_at_gamma 0.6
+    if args.freeze_cross_ln and args.unfreeze_cross_ln_at_gamma is not None:
+        trainer.add_callback(UnfreezeCrossLNAtGamma(args.unfreeze_cross_ln_at_gamma))
+    
+    
+    # Early Stopping: min_step 이후부터만 적용
+    min_step = args.early_stop_min_step
+    if min_step is None:
+        # 기본값: γ 전환이 끝나는 시점 이후(= gamma_end_frac * max_steps)
+        min_step = int(training_args.max_steps * args.gamma_end_frac)
+        
+    delayed_early = DelayedEarlyStoppingCallback(
+        metric_name="cer",
+        greater_is_better=False,
+        patience=10,
+        threshold=5e-4,
+        min_step=min_step,          # ★ 예: 100000 * 0.4 = 40000
+    )
+    
+    trainer.add_callback(delayed_early)
 
     print("모델 학습을 시작합니다...")
     trainer.train()
