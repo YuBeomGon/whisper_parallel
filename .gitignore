@@ -1,0 +1,10 @@
+mlruns/*
+wandb/*
+whisper-large-v3-parallel-zeroth-streaming/*
+whisper-parallel-librispeech_en/*
+whisper-parallel-zeroth_ko/*
+hf_cache/*
+*/__pycache__/*
+*/__pycache__/*/*
+*/__pycache__/*/*/*
+*/__pycache__/*/*/*/*

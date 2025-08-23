@@ -5,15 +5,16 @@
 from datasets import load_dataset, DatasetDict, Audio
 from transformers import WhisperProcessor
 from whisper.normalizers.basic import BasicTextNormalizer
+from utils.hf_io import load_with_retry   # ← 추가
 
-def load_and_prepare_dataset(processor: WhisperProcessor,
-                             train_split: str = "train",
-                             eval_split: str = "test") -> DatasetDict:
-    """
-    Zeroth-Korean 데이터셋을 로드하고 전처리합니다.
-    - train_split: 기본 'train'
-    - eval_split : 기본 'test'
-    """
+def load_and_prepare_dataset(
+    processor: WhisperProcessor,
+    train_split: str = "train",
+    eval_split: str = "test",
+    cache_dir: str | None = None,
+    streaming_train: bool = True,
+    hf_revision: str = "main",
+):
     normalizer = BasicTextNormalizer()
 
     def process_function(batch):
@@ -27,20 +28,32 @@ def load_and_prepare_dataset(processor: WhisperProcessor,
         batch["labels"] = labels
         return batch
 
-    # --- Train (streaming) ---
-    print(f"학습(train) split='{train_split}' (streaming) 로드 중...")
-    train_ds = load_dataset("Bingsu/zeroth-korean", split=train_split, streaming=True)
+    # --- train (streaming)
+    print(f"학습(train) split='{train_split}' (streaming={streaming_train}) 로드 중...")
+    train_ds = load_with_retry(
+        "Bingsu/zeroth-korean",
+        split=train_split,
+        streaming=streaming_train,
+        revision=hf_revision,
+        cache_dir=cache_dir,
+    )
     train_ds = train_ds.map(process_function)
     print("학습 데이터셋 준비 완료.")
 
-    # --- Eval (standard) ---
+    # --- eval (non-streaming)
     print(f"평가(eval) split='{eval_split}' 로드 중...")
-    eval_ds = load_dataset("Bingsu/zeroth-korean", split=eval_split)
-    eval_ds = eval_ds.cast_column("audio", Audio(sampling_rate=16000))
-    eval_ds = eval_ds.map(
+    test_ds = load_with_retry(
+        "Bingsu/zeroth-korean",
+        split=eval_split,
+        revision=hf_revision,
+        cache_dir=cache_dir,
+    )
+    test_ds = test_ds.cast_column("audio", Audio(sampling_rate=16000))
+    test_ds = test_ds.map(
         process_function,
-        remove_columns=eval_ds.column_names,
+        remove_columns=test_ds.column_names,
         num_proc=1,
     )
     print("평가 데이터셋 준비 완료.")
-    return DatasetDict({"train": train_ds, "test": eval_ds})
+
+    return DatasetDict({"train": train_ds, "test": test_ds})

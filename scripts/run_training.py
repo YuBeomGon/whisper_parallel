@@ -4,6 +4,7 @@
 #       └ 데이터셋/모델/하이퍼파라미터를 CLI 인자로 받음
 # ==============================================================================
 
+import os
 import math
 import argparse
 import torch
@@ -47,7 +48,7 @@ def set_cross_ln_requires_grad(model, requires_grad: bool):
             
 class UnfreezeCrossLNAtGamma(TrainerCallback):
     """gamma가 threshold 이하로 내려가면 cross-attn LN만 해제"""
-    def __init__(self, threshold: float):
+    def __init__(self, threshold: float, lr: float):
         self.threshold = threshold
         self.lr = lr
         self.done = False
@@ -200,10 +201,10 @@ def parse_args():
                    help="강제 언어 프롬프트(기본: zeroth_ko=ko, librispeech_en=en)")
 
     # LibriSpeech 옵션
-    p.add_argument("--ls_train_split", type=str, default="train.360",
-                   help="LibriSpeech train split (예: train.clean.100)")
-    p.add_argument("--ls_eval_split", type=str, default="validation",
-                   help="LibriSpeech eval split (예: validation/test)")
+    p.add_argument("--ls_train_split", type=str, default="train.clean.360",
+                   help="LibriSpeech train split (예: train.clean.360)")
+    p.add_argument("--ls_eval_split", type=str, default="validation.clean",
+                   help="LibriSpeech eval split (예: validation)")
 
     # --- 러닝 하이퍼파라미터 ---
     p.add_argument("--output_dir", type=str, default=None, help="출력 디렉토리(기본: 자동)")
@@ -234,11 +235,30 @@ def parse_args():
     # Early Stopping을 언제부터 켤지
     p.add_argument("--early_stop_min_step", type=int, default=None,
                 help="이 스텝 이후부터 Early Stopping 적용 (미지정 시 gamma_end_frac*max_steps)")    
+    
+    p.add_argument("--hf_cache_base", type=str, default="./hf_cache",
+                help="HF datasets cache base dir (데이터셋별 하위폴더로 분리)")
+    p.add_argument("--hf_timeout", type=int, default=90,
+                help="HuggingFace Hub HTTP timeout (sec)")
+    p.add_argument("--hf_enable_transfer", action="store_true",
+                help="HF 전송 가속(hf_transfer) 활성화")
+    
     return p.parse_args()
 
 
 def run_training():
     args = parse_args()
+
+    # set cache_dir and hf_timeout:
+    os.environ["HUGGINGFACE_HUB_HTTP_TIMEOUT"] = str(args.hf_timeout)
+    if args.hf_enable_transfer:
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
+
+    # 데이터셋별 분리 캐시 디렉토리
+    ds_sub = "zeroth" if args.dataset == "zeroth_ko" else "librispeech"
+    dataset_cache_dir = os.path.join(args.hf_cache_base, ds_sub)
+    os.makedirs(dataset_cache_dir, exist_ok=True)
+    print(f"[HF cache] {dataset_cache_dir}")    
 
     # 성능 스위치
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -307,11 +327,25 @@ def run_training():
 
     # 3) 데이터
     if args.dataset == "zeroth_ko":
-        datasets = load_ko(processor)
+        datasets = load_ko(
+            processor,
+            train_split="train",
+            eval_split="test",
+            cache_dir=dataset_cache_dir,
+            streaming_train=True,
+            hf_revision="main",
+    )
     else:
         if not HAS_LIBRISPEECH:
             raise RuntimeError("librispeech_en을 선택했지만 'data/prepare_librispeech.py'가 없습니다.")
-        datasets = load_en(processor, train_split=args.ls_train_split, eval_split=args.ls_eval_split)
+        datasets = load_en(
+            processor,
+            train_split=args.ls_train_split,      # e.g., train.clean.100 / train.360
+            eval_split=args.ls_eval_split,        # e.g., validation.clean / test.clean
+            cache_dir=dataset_cache_dir,
+            streaming_train=True,
+            hf_revision="main",
+            )
 
     model_dtype = next(model.parameters()).dtype
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor, model_dtype=model_dtype)
@@ -336,7 +370,7 @@ def run_training():
         bf16=use_bf16,
         fp16=not use_bf16,
         optim="adamw_torch_fused",
-        dataloader_num_workers=8,
+        dataloader_num_workers=6,
         dataloader_pin_memory=True,
         dataloader_persistent_workers=True,
         dataloader_prefetch_factor=4,

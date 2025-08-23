@@ -1,25 +1,17 @@
-# ==============================================================================
-# 파일: data/prepare_librispeech.py
-# 역할: Hugging Face 'librispeech_asr' 로드/전처리
-#      - train_split / eval_split 문자열 그대로 사용
-#      - 각 split별로 'clean'/'other' 구성 자동 감지
-# 예) train_split='train.clean.100', eval_split='validation.clean' (또는 'test.other')
-# ==============================================================================
-from typing import Dict
-from datasets import load_dataset, DatasetDict, Audio
+# data/prepare_librispeech.py
+from datasets import DatasetDict, Audio
 from transformers import WhisperProcessor
 from whisper.normalizers.english import EnglishTextNormalizer
-
-
-def _cfg_from_split(split: str) -> str:
-    # 스플릿 문자열에 'other' 포함되면 other, 아니면 clean
-    return "other" if ".other" in split else "clean"
+from utils.hf_io import load_with_retry
 
 def load_and_prepare_dataset(
     processor: WhisperProcessor,
-    train_split: str = "train.360",
+    train_split: str = "train.clean.100",
     eval_split: str = "validation.clean",
-) -> Dict:
+    cache_dir: str | None = None,
+    streaming_train: bool = True,
+    hf_revision: str = "main",
+):
     normalizer = EnglishTextNormalizer()
 
     def process_function(batch):
@@ -33,18 +25,26 @@ def load_and_prepare_dataset(
         batch["labels"] = labels
         return batch
 
-    # --- Train (streaming) ---
-    train_cfg = _cfg_from_split(train_split)
-    print(f"학습(train) split='{train_split}' (cfg='{train_cfg}', streaming) 로드 중...")
-    train_ds = load_dataset("librispeech_asr", train_cfg, split=train_split, streaming=True)
-    train_ds = train_ds.cast_column("audio", Audio(sampling_rate=16000))
+    # train (streaming)
+    print(f"학습(train) split='{train_split}' (streaming={streaming_train}) 로드 중...")
+    train_ds = load_with_retry(
+        "librispeech_asr",
+        split=train_split,
+        streaming=streaming_train,
+        revision=hf_revision,
+        cache_dir=cache_dir,
+    )
     train_ds = train_ds.map(process_function)
     print("학습 데이터셋 준비 완료.")
 
-    # --- Eval (standard) ---
-    eval_cfg = _cfg_from_split(eval_split)
-    print(f"평가(eval) split='{eval_split}' (cfg='{eval_cfg}') 로드 중...")
-    eval_ds = load_dataset("librispeech_asr", eval_cfg, split=eval_split)
+    # eval (non-streaming)
+    print(f"평가(eval) split='{eval_split}' 로드 중...")
+    eval_ds = load_with_retry(
+        "librispeech_asr",
+        split=eval_split,
+        revision=hf_revision,
+        cache_dir=cache_dir,
+    )
     eval_ds = eval_ds.cast_column("audio", Audio(sampling_rate=16000))
     eval_ds = eval_ds.map(
         process_function,
@@ -52,4 +52,5 @@ def load_and_prepare_dataset(
         num_proc=1,
     )
     print("평가 데이터셋 준비 완료.")
+
     return DatasetDict({"train": train_ds, "test": eval_ds})
