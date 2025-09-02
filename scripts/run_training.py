@@ -329,7 +329,8 @@ def run_training():
     if args.decoder_mode == "parallel":
         print("디코더 레이어를 병렬 구조로 교체합니다...")
         for i in range(model.config.decoder_layers):
-            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(model.config, layer_idx=i)
+            vanilla = model.model.decoder.layers[i]  # ← 프리트레인 가중치 포함
+            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(vanilla, layer_idx=i)
     else:
         print("바닐라(원복) Whisper 디코더를 그대로 사용합니다. (γ 스케줄 비활성)")
 

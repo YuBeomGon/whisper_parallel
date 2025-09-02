@@ -458,7 +458,8 @@ def main():
         if not HAS_PARALLEL:
             raise RuntimeError("models.parallel_decoder가 필요합니다.")
         for i in range(model.config.decoder_layers):
-            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(model.config, layer_idx=i)
+            vanilla = model.model.decoder.layers[i]  # ← 프리트레인 가중치 포함
+            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(vanilla, layer_idx=i)
         _cast_all_layer_norm_to_fp32(model)
         _sync_layernorm_dtype_with_input(model)
     else:

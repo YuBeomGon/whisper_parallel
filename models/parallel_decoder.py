@@ -16,29 +16,28 @@ from transformers.models.whisper.modeling_whisper import (
 )
 
 class ParallelWhisperDecoderLayer(nn.Module):
-    def __init__(self, config: WhisperConfig, layer_idx: int):
+    def __init__(self, ref_layer: WhisperDecoderLayer, layer_idx: int):
         super().__init__()
-        ref = WhisperDecoderLayer(config, layer_idx=layer_idx)
-
-        self.embed_dim = config.d_model
         self.layer_idx = layer_idx
 
-        # 원본 모듈 재사용
-        self.self_attn = ref.self_attn
-        self.cross_attn = ref.encoder_attn
-        self.fc1 = ref.fc1
-        self.fc2 = ref.fc2
-        self.activation_fn = ref.activation_fn
+        # ====== 가중치/모듈을 "그대로" 재사용 (프리트레인 보존) ======
+        self.embed_dim = ref_layer.embed_dim
+        self.self_attn = ref_layer.self_attn
+        self.cross_attn = ref_layer.encoder_attn
+        self.fc1 = ref_layer.fc1
+        self.fc2 = ref_layer.fc2
+        self.activation_fn = ref_layer.activation_fn
 
-        self.self_attn_layer_norm = ref.self_attn_layer_norm
-        self.encoder_attn_layer_norm = ref.encoder_attn_layer_norm
-        self.final_layer_norm = ref.final_layer_norm
+        self.self_attn_layer_norm   = ref_layer.self_attn_layer_norm
+        self.encoder_attn_layer_norm= ref_layer.encoder_attn_layer_norm
+        self.final_layer_norm       = ref_layer.final_layer_norm
 
-        # 드롭아웃 확률(Whisper는 보통 float로 저장됨)
-        self.dropout_p = getattr(config, "dropout", 0.0)
-        self.activation_dropout_p = getattr(config, "activation_dropout", 0.0)
+        # ====== dropout 확률은 ref_layer의 속성에서 읽기 ======
+        # (WhisperDecoderLayer는 self.dropout / self.activation_dropout을 가짐)
+        self.dropout_p = float(getattr(ref_layer, "dropout", 0.0))
+        self.activation_dropout_p = float(getattr(ref_layer, "activation_dropout", 0.0))
 
-        # ★ γ 스위치: 1.0(원본과 동일) → 0.0(완전 병렬)로 스케줄링
+        # 감마 스위치
         self.register_buffer("gamma", torch.tensor(1.0), persistent=False)
 
     # --- 어텐션 호출(버전 차이 안전 처리) ---
