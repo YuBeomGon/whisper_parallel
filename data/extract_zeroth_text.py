@@ -1,3 +1,4 @@
+# ==============================================================================
 # data/extract_zeroth_text.py
 # 목적: Bingsu/zeroth-korean 전사 텍스트를 추출해 한 줄=한 문장 txt로 저장
 # 사용 예:
@@ -9,7 +10,7 @@
 #   --dedup:  중복 문장 제거
 #   --min_chars: 너무 짧은 문장 제거
 #   --hf_cache: HF_DATASETS_CACHE 지정(네트워크 이슈/캐시 분리용)
-
+# ==============================================================================
 import os
 import argparse
 from datasets import load_dataset

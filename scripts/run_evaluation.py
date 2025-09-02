@@ -1,4 +1,8 @@
-# scripts/run_evaluation.py
+# ==============================================================================
+# 목적: 모델 평가
+# 사용 예: 
+#   CUDA_VISIBLE_DEVICES=7 python -m scripts.run_evaluation --arch parallel --base_model openai/whisper-large-v3-turbo --model_path whisper-parallel-zeroth_ko/checkpoint-78000 --dataset zeroth_ko --ls_eval_split test --gamma 0.0
+# ==============================================================================
 import os, glob, argparse
 import torch
 import jiwer

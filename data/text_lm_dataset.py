@@ -1,4 +1,9 @@
+# ==============================================================================
 # data/text_lm_dataset.py
+# 목적: 여러 txt 파일을 읽어 하나로 이어붙이고 block_size 단위로 잘라 샘플을 만드는 데이터셋
+# 사용 예: 
+#   python -m data.text_lm_dataset --files data/text_corpus/*.txt --out data/text_lm_dataset.py
+# ==============================================================================
 from typing import List, Iterator
 import pathlib
 import torch

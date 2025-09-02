@@ -3,17 +3,29 @@
 # 역할: 텍스트 LM(WhisperDecoderLM) 가중치를 Parallel ASR 모델에 보간(interpolate) 병합
 #       - ASR: ParallelWhisperDecoderLayer로 아키텍처 교체 후, 학습 체크포인트 로드
 #       - LM : LoRA 어댑터면 merge_and_unload, 아니면 그대로 state_dict 로드
-#       - 지정된 하위 모듈만 alpha로 보간(교차어텐션은 제외)
-# 사용법:
+#       - 지정된 하위 모듈만 alpha로 보간(교차어텐션은 제외), QK-only/화이트리스트 병합 지원
+# 사용법(일반):
 # CUDA_VISIBLE_DEVICES=0 python -m scripts.merge_lm_back_to_asr \
 #   --asr_dir saved/whisper-parallel-zeroth_ko/checkpoint-78000 \
 #   --lm_dir  saved/whisper-decoder-lm-ko \
 #   --base_model openai/whisper-large-v3-turbo \
-#   --alpha 0.3 \
-#   --include_self_attn --include_ffn --include_ln \
+#   --alpha 0.1 \
+#   --include_self_attn --include_ffn \
 #   --gamma_after 0.0 \
-#   --out_dir saved/merged-parallel-ko-a0_3
+#   --out_dir saved/merged-parallel-ko-a0_1
+#
+# 사용법(QK 전용 병합):
+# CUDA_VISIBLE_DEVICES=0 python -m scripts.merge_lm_back_to_asr \
+#   --asr_dir saved/whisper-parallel-zeroth_ko/checkpoint-78000 \
+#   --lm_dir  saved/whisper-decoder-lm-qk \
+#   --base_model openai/whisper-large-v3-turbo \
+#   --alpha 0.1 \
+#   --include_self_attn \
+#   --qk_only \
+#   --gamma_after 0.0 \
+#   --out_dir saved/merged-parallel-ko-a0_1-qk
 # ==============================================================================
+
 
 import os, glob, argparse
 from typing import Dict, Tuple

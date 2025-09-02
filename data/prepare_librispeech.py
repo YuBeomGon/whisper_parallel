@@ -1,4 +1,9 @@
+# ==============================================================================
 # data/prepare_librispeech.py
+# 목적: LibriSpeech 데이터셋 준비
+# 사용 예:
+#   python -m data.prepare_librispeech --out data/librispeech_asr.py
+# ==============================================================================
 from datasets import DatasetDict, Audio
 from transformers import WhisperProcessor
 from whisper.normalizers.english import EnglishTextNormalizer

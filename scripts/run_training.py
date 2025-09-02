@@ -2,6 +2,25 @@
 # 파일: scripts/run_training.py
 # 역할: 병렬 디코더 학습(인코더 freeze + γ-annealing + CER Early Stopping)
 #       └ 데이터셋/모델/하이퍼파라미터를 CLI 인자로 받음
+# 사용법: 
+# 바닐라
+#   CUDA_VISIBLE_DEVICES=7 python -m scripts.run_training \
+#   --dataset zeroth_ko \
+#   --model_name openai/whisper-large-v3-turbo \
+#   --decoder_mode vanilla \
+#   --learning_rate 3e-5 \
+#   --warmup_steps 1000 \
+#   --max_steps 20000 --eval_steps 2000 --save_steps 2000 \
+#   --freeze_cross_attn --freeze_cross_ln
+  
+#   패러럴
+#   CUDA_VISIBLE_DEVICES=7 python -m scripts.run_training \
+#   --dataset zeroth_ko \
+#   --model_name openai/whisper-large-v3-turbo \
+#   --decoder_mode parallel \
+#   --learning_rate 1e-4 --warmup_steps 2000 \
+#   --max_steps 100000 --eval_steps 2000 --save_steps 2000 \
+#   --gamma_start 1.0 --gamma_end 0.0 --gamma_start_frac 0.0 --gamma_end_frac 0.6
 # ==============================================================================
 
 import os
@@ -23,6 +42,7 @@ from transformers import (
 from transformers.trainer_callback import TrainerCallback
 
 from utils.data_collator import DataCollatorSpeechSeq2SeqWithPadding
+from utils.logger import _init_run_logger
 from data.prepare_zeroth_korean import load_and_prepare_dataset as load_ko
 from models.parallel_decoder import ParallelWhisperDecoderLayer
 
@@ -203,7 +223,7 @@ def parse_args():
     # LibriSpeech 옵션
     p.add_argument("--ls_train_split", type=str, default="train.clean.360",
                    help="LibriSpeech train split (예: train.clean.360)")
-    p.add_argument("--ls_eval_split", type=str, default="validation.clean",
+    p.add_argument("--ls_eval_split", type=str, default="validation",
                    help="LibriSpeech eval split (예: validation)")
 
     # --- 러닝 하이퍼파라미터 ---
@@ -215,12 +235,16 @@ def parse_args():
     p.add_argument("--max_steps", type=int, default=100000)
     p.add_argument("--eval_steps", type=int, default=2000)
     p.add_argument("--save_steps", type=int, default=2000)
+    
+    # vanilla 또는 parallel 모드 선택
+    p.add_argument("--decoder_mode", choices=["parallel", "vanilla"], default="parallel",
+                help="decoder 모드 선택: parallel(γ-anneal) | vanilla(원복 Whisper 디코더)")    
 
     # --- γ 스케줄 ---
     p.add_argument("--gamma_start", type=float, default=1.0)
     p.add_argument("--gamma_end", type=float, default=0.0)
     p.add_argument("--gamma_start_frac", type=float, default=0.0)
-    p.add_argument("--gamma_end_frac", type=float, default=0.4)
+    p.add_argument("--gamma_end_frac", type=float, default=0.6)
 
     # --- 기타 ---
     p.add_argument("--no_freeze_encoder", action="store_true", help="인코더 동결 해제")
@@ -248,6 +272,8 @@ def parse_args():
 
 def run_training():
     args = parse_args()
+    
+    log_path = _init_run_logger(args.decoder_mode)
 
     # set cache_dir and hf_timeout:
     os.environ["HUGGINGFACE_HUB_HTTP_TIMEOUT"] = str(args.hf_timeout)
@@ -299,9 +325,13 @@ def run_training():
         normalizer = BasicTextNormalizer()
 
     # 2) 병렬 디코더 교체 + 인코더 freeze
-    print("디코더 레이어를 병렬 구조로 교체합니다...")
-    for i in range(model.config.decoder_layers):
-        model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(model.config, layer_idx=i)
+    print("디코더 레이어 설정을 준비합니다...")
+    if args.decoder_mode == "parallel":
+        print("디코더 레이어를 병렬 구조로 교체합니다...")
+        for i in range(model.config.decoder_layers):
+            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(model.config, layer_idx=i)
+    else:
+        print("바닐라(원복) Whisper 디코더를 그대로 사용합니다. (γ 스케줄 비활성)")
 
     if not args.no_freeze_encoder:
         print("인코더 파라미터를 동결합니다...")
@@ -351,7 +381,12 @@ def run_training():
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(processor=processor, model_dtype=model_dtype)
 
     # 4) 학습 인자
-    out_dir = args.output_dir or f"./whisper-parallel-{args.dataset}"
+    if args.output_dir is not None:
+        out_dir = args.output_dir
+    else:
+        base = "whisper-parallel" if args.decoder_mode == "parallel" else "whisper-origin"
+        out_dir = f"./saved/{base}-{args.dataset}"
+        
     training_args = Seq2SeqTrainingArguments(
         output_dir=out_dir,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -392,30 +427,34 @@ def run_training():
     )
 
     # 6) 콜백: γ-anneal + Early Stopping
-    gamma_cb = ParallelTransitionCallback(
-        total_steps=training_args.max_steps,
-        start=args.gamma_start, end=args.gamma_end,
-        start_frac=args.gamma_start_frac, end_frac=args.gamma_end_frac,
-    )
-    trainer.add_callback(gamma_cb)
-    
-    # LN 지연 해제: 예) --unfreeze_cross_ln_at_gamma 0.6
-    if args.freeze_cross_ln and args.unfreeze_cross_ln_at_gamma is not None:
-        trainer.add_callback(UnfreezeCrossLNAtGamma(args.unfreeze_cross_ln_at_gamma, lr=args.learning_rate))
-    
+    if args.decoder_mode == "parallel":
+        gamma_cb = ParallelTransitionCallback(
+            total_steps=training_args.max_steps,
+            start=args.gamma_start, end=args.gamma_end,
+            start_frac=args.gamma_start_frac, end_frac=args.gamma_end_frac,
+        )
+        trainer.add_callback(gamma_cb)
+
+        if args.freeze_cross_ln and args.unfreeze_cross_ln_at_gamma is not None:
+            trainer.add_callback(UnfreezeCrossLNAtGamma(args.unfreeze_cross_ln_at_gamma, lr=args.learning_rate))
+    else:
+        if args.unfreeze_cross_ln_at_gamma is not None:
+            print("[WARN] --unfreeze_cross_ln_at_gamma는 vanilla 모드에서 무시됩니다.")
+        
     
     # Early Stopping: min_step 이후부터만 적용
     min_step = args.early_stop_min_step
     if min_step is None:
         # 기본값: γ 전환이 끝나는 시점 이후(= gamma_end_frac * max_steps)
-        min_step = int(training_args.max_steps * args.gamma_end_frac)
+        base_frac = args.gamma_end_frac if args.decoder_mode == "parallel" else 0.6
+        min_step = int(training_args.max_steps * base_frac)
         
     delayed_early = DelayedEarlyStoppingCallback(
         metric_name="cer",
         greater_is_better=False,
         patience=10,
         threshold=5e-4,
-        min_step=min_step,          # ★ 예: 100000 * 0.4 = 40000
+        min_step=min_step,          # ★ 예: 100000 * 0.6 = 60000
     )
     
     trainer.add_callback(delayed_early)
@@ -423,6 +462,7 @@ def run_training():
     print("모델 학습을 시작합니다...")
     trainer.train()
     print("학습 완료!")
+    print(f"[LOG] full log at: {log_path}")    
 
 
 if __name__ == "__main__":

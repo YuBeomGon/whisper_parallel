@@ -137,9 +137,9 @@ class ParallelWhisperDecoderLayer(nn.Module):
         )
 
         # ===== 병합 + FFN =====
-        self_out = F.dropout(self_out, p=self.dropout_p, training=self.training)
+        # self_out = F.dropout(self_out, p=self.dropout_p, training=self.training)
         cross_out = F.dropout(cross_out, p=self.dropout_p, training=self.training)
-        merged = residual + self_out + cross_out
+        merged = residual + self_out_d + cross_out
 
         ffn_residual = merged
         ffn_in = self.final_layer_norm(merged)
