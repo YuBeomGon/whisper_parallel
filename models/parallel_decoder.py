@@ -39,6 +39,9 @@ class ParallelWhisperDecoderLayer(nn.Module):
 
         # 감마 스위치
         self.register_buffer("gamma", torch.tensor(1.0), persistent=False)
+        
+        self.gate_self = nn.Parameter(torch.tensor(0.7071))
+        self.gate_cross = nn.Parameter(torch.tensor(0.7071))        
 
     # --- 어텐션 호출(버전 차이 안전 처리) ---
     def _call_self_attn(self, hidden_states, attention_mask, layer_head_mask,
@@ -138,7 +141,9 @@ class ParallelWhisperDecoderLayer(nn.Module):
         # ===== 병합 + FFN =====
         # self_out = F.dropout(self_out, p=self.dropout_p, training=self.training)
         cross_out = F.dropout(cross_out, p=self.dropout_p, training=self.training)
-        merged = residual + self_out_d + cross_out
+        
+        # add gating
+        merged = residual + self.gate_self * self_out_d + self.gate_cross * cross_out
 
         ffn_residual = merged
         ffn_in = self.final_layer_norm(merged)

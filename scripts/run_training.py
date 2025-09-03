@@ -55,10 +55,13 @@ except Exception:
 
 
 def set_cross_attn_requires_grad(model, requires_grad: bool):
-    # 디코더 cross-attn 파라미터 전부 동결/해제
     for layer in model.model.decoder.layers:
-        for p in layer.cross_attn.parameters():
-            p.requires_grad = requires_grad
+        attn = getattr(layer, "cross_attn", None)
+        if attn is None:
+            attn = getattr(layer, "encoder_attn", None)
+        if attn is not None:
+            for p in attn.parameters():
+                p.requires_grad = requires_grad
 
 def set_cross_ln_requires_grad(model, requires_grad: bool):
     # cross-attn 앞 LayerNorm 동결/해제
@@ -453,7 +456,7 @@ def run_training():
     delayed_early = DelayedEarlyStoppingCallback(
         metric_name="cer",
         greater_is_better=False,
-        patience=10,
+        patience=5,
         threshold=5e-4,
         min_step=min_step,          # ★ 예: 100000 * 0.6 = 60000
     )

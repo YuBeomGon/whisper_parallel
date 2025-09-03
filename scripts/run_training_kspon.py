@@ -543,9 +543,8 @@ def main():
             trainer.add_callback(UnfreezeCrossLNAtGamma(args.unfreeze_cross_ln_at_gamma, lr=args.learning_rate))
 
     min_step = int(training_args.max_steps * (args.gamma_end_frac if args.decoder_mode == "parallel" else 0.6))
-    min_step = training_args.max_steps * 0.8
     trainer.add_callback(DelayedEarlyStoppingCallback(
-        metric_name="cer", greater_is_better=False, patience=10, threshold=5e-4, min_step=min_step
+        metric_name="cer", greater_is_better=False, patience=5, threshold=5e-4, min_step=min_step
     ))
 
     # 7) 학습
