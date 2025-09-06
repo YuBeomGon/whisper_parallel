@@ -90,7 +90,8 @@ def build_model(base_model_id: str, arch: str, torch_dtype):
         if not HAS_PARALLEL:
             raise RuntimeError("Parallel decoder not found. Add models.parallel_decoder or use --arch original.")
         for i in range(model.config.decoder_layers):
-            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(model.config, layer_idx=i)
+            vanilla = model.model.decoder.layers[i]
+            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(vanilla, layer_idx=i)
     return model
 
 

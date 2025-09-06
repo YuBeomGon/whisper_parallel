@@ -42,7 +42,8 @@ def build_model(base_model: str, arch: str, torch_dtype):
     if arch == "parallel":
         # 병렬 디코더로 교체
         for i in range(model.config.decoder_layers):
-            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(model.config, layer_idx=i)
+            vanilla = model.model.decoder.layers[i]
+            model.model.decoder.layers[i] = ParallelWhisperDecoderLayer(vanilla, layer_idx=i)
     return model
 
 def set_decoder_gamma(model, gamma: float):
